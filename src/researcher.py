@@ -39,8 +39,8 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
             for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:10]:
                 prob = m.get("probability", 0) * 100
                 lines.append(f"✅ {prob:.0f}% | ${m.get('volume', 0):,.0f}")
-                lines.append(f"   {m.get('question', '')[:45]}")
-                lines.append(f"   🔗 {m.get('url', '')[:45]}")
+                lines.append(f"   {m.get('question', '')}")
+                lines.append(f"   🔗 {m.get('url', '')}")
             lines.append("")
         else:
             lines.append("No sure bets found this scan.")
