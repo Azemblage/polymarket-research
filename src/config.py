@@ -33,7 +33,7 @@ class Config:
     enable_alerts: bool = os.getenv("ENABLE_ALERTS", "true").lower() == "true"
     
     # Filter
-    min_volume: float = float(os.getenv("MIN_VOLUME", "100000"))  # $100K min volume
+    min_volume: float = float(os.getenv("MIN_VOLUME", "500000"))  # $100K min volume
 
     @classmethod
     def validate(cls) -> list[str]:

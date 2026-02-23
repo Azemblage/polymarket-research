@@ -22,7 +22,7 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
         import httpx
         
         # Categorize markets
-        green_markets = [m for m in markets_with_research if m.get("probability", 0) > 0.80]
+        green_markets = [m for m in markets_with_research if 0.70 <= m.get("probability", 0) <= 0.90]
         yellow_markets = [m for m in markets_with_research if 0.60 < m.get("probability", 0) <= 0.80]
         
         # Build message
@@ -35,7 +35,7 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
         
         # GREEN - SURE BETS
         if green_markets:
-            lines.append("🟢 SURE BETS (>80% - BUY YES):")
+            lines.append("🟢 HIGH VALUE BETS (70-90% - Good Reward!):")
             for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:10]:
                 prob = m.get("probability", 0) * 100
                 lines.append(f"✅ {prob:.0f}% | ${m.get('volume', 0):,.0f}")
