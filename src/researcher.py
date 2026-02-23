@@ -29,26 +29,22 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
         lines = [
             "🎯 Polymarket Research Report",
             "=" * 35,
-            f"Analyzed: {len(markets_with_research)} | 🟢Sure: {len(green_markets)} | 🟡Likely: {len(yellow_markets)}",
+            f"Scanned {len(markets_with_research)} markets | Found {len(green_markets)} SURE BETS",
             ""
         ]
         
         # GREEN - SURE BETS
         if green_markets:
             lines.append("🟢 SURE BETS (>80% - BUY YES):")
-            for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
+            for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:10]:
                 prob = m.get("probability", 0) * 100
                 lines.append(f"✅ {prob:.0f}% | ${m.get('volume', 0):,.0f}")
                 lines.append(f"   {m.get('question', '')[:45]}")
                 lines.append(f"   🔗 {m.get('url', '')[:45]}")
             lines.append("")
+        else:
+            lines.append("No sure bets found this scan.")
         
-        # YELLOW - LIKELY
-        if yellow_markets:
-            lines.append("🟡 LIKELY (60-80%):")
-            for m in sorted(yellow_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
-                prob = m.get("probability", 0) * 100
-                lines.append(f"{prob:.0f}% | ${m.get('volume', 0):,.0f} | {m.get('question', '')[:40]}...")
         
         msg = "\n".join(lines)
         
