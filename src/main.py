@@ -75,7 +75,7 @@ async def main():
                 await send_telegram_alert(config, research_results)
             
             # Categorize markets
-            green_markets = [m for m in research_results if m.get("probability", 0) > 0.80]  # 80%+ = almost certain
+            green_markets = [m for m in research_results if m.get("probability", 0) >= 0.70 and m.get("probability", 0) <= 0.90]  # 70-90% = good value
             yellow_markets = [m for m in research_results if 0.60 < m.get("probability", 0) <= 0.80]  # 60-80% = likely
             red_markets = [m for m in research_results if m.get("probability", 0) <= 0.40]  # <40% = likely NO
             
