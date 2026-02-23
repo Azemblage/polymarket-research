@@ -44,7 +44,7 @@ async def main():
             logger.info("Starting research cycle...")
             
             # Scrape market data
-            markets = await scraper.scrape_markets(limit=50)
+            markets = await scraper.scrape_markets(limit=200)
             logger.info(f"Scraped {len(markets)} markets")
             
             # Filter by volume
@@ -53,7 +53,7 @@ async def main():
             
             # Sort by volume and take top N
             sorted_markets = sorted(filtered, key=lambda x: x.get("volume", 0), reverse=True)
-            top_markets = sorted_markets[:config.max_markets_per_run]
+            top_markets = sorted_markets
             
             # Research each market
             research_results = []
