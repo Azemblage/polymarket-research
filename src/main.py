@@ -75,8 +75,8 @@ async def main():
                 await send_telegram_alert(config, research_results)
             
             # Categorize markets
-            green_markets = [m for m in research_results if m.get("probability", 0) >= 0.70 and m.get("probability", 0) <= 0.90]  # 70-90% = good value
-            yellow_markets = [m for m in research_results if 0.60 < m.get("probability", 0) <= 0.80]  # 60-80% = likely
+            green_markets = [m for m in research_results if m.get("probability", 0) > 0.90]  # 70-90% = good value
+            yellow_markets = [m for m in research_results if 0.70 <= m.get("probability", 0) <= 0.90]  # 60-80% = likely
             red_markets = [m for m in research_results if m.get("probability", 0) <= 0.40]  # <40% = likely NO
             
             # Print summary
@@ -86,7 +86,7 @@ async def main():
             
             # GREEN - HIGH PROBABILITY (BUY YES)
             if green_markets:
-                print("\n🟢 SURE BETS (BUY YES - >80%):")
+                print("\n🟢 GREEN - >90% (BUY YES - >80%):")
                 print("-" * 40)
                 for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True):
                     prob = m.get("probability", 0) * 100
@@ -94,9 +94,9 @@ async def main():
                     print(f"      {m.get('question', '')[:55]}")
                     print(f"      🔗 {m.get('url', '')[:50]}")
             
-            # YELLOW - LIKELY
+            # YELLOW - YELLOW - 70-90%
             if yellow_markets:
-                print(f"\n🟡 LIKELY ({len(yellow_markets)} markets)")
+                print(f"\n🟡 YELLOW - 70-90% ({len(yellow_markets)} markets)")
                 for m in sorted(yellow_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
                     prob = m.get("probability", 0) * 100
                     print(f"   {prob:.0f}% | {m.get('question', '')[:50]}...")

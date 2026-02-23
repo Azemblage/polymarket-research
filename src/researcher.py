@@ -22,18 +22,18 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
         import httpx
         
         # Categorize markets
-        green_markets = [m for m in markets_with_research if 0.70 <= m.get("probability", 0) <= 0.90]
-        yellow_markets = [m for m in markets_with_research if 0.60 < m.get("probability", 0) <= 0.80]
+        green_markets = [m for m in markets_with_research if m.get("probability", 0) > 0.90]
+        yellow_markets = [m for m in markets_with_research if 0.70 <= m.get("probability", 0) <= 0.90]
         
         # Build message
         lines = [
             "🎯 Polymarket Research Report",
             "=" * 35,
-            f"Scanned {len(markets_with_research)} markets | Found {len(green_markets)} SURE BETS",
+            f"Scanned {len(markets_with_research)} markets | Found {len(green_markets)} GREEN - >90%",
             ""
         ]
         
-        # GREEN - SURE BETS
+        # GREEN - GREEN - >90%
         if green_markets:
             lines.append("🟢 HIGH VALUE BETS (70-90% - Good Reward!):")
             for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:10]:
