@@ -51,22 +51,22 @@ async def main():
             filtered = [m for m in markets if m.get("volume", 0) >= config.min_volume]
             logger.info(f"Filtered to {len(filtered)} markets with volume >= ${config.min_volume:,.0f}")
             
-            # Sort by volume and take top N
+            # Sort by volume and take top N (more variety)
             sorted_markets = sorted(filtered, key=lambda x: x.get("volume", 0), reverse=True)
-            top_markets = sorted_markets
+            top_markets = sorted_markets[:50]  # Process top 50 markets for variety
             
-            # Research each market
+            # Research each market (skip cache to get fresh data each time)
             research_results = []
             for market in top_markets:
                 logger.info(f"Researching: {market.get('question', 'N/A')[:50]}...")
                 
-                # Combine market data with research
-                research = await researcher.research_market(market)
+                # Combine market data with research (no cache for fresh scans)
+                research = await researcher.research_market(market, use_cache=False)
                 market_with_research = {**market, "insights": research.get("insights", {})}
                 research_results.append(market_with_research)
                 
                 # Brief delay to be nice to APIs
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.3)
             
             logger.info(f"Researched {len(research_results)} markets")
             

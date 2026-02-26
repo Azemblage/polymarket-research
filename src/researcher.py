@@ -71,12 +71,13 @@ class Researcher:
         self.config = config
         self.cache_dir = Path("data/cache")
 
-    async def research_market(self, market: Dict[str, Any]) -> Dict[str, Any]:
+    async def research_market(self, market: Dict[str, Any], use_cache: bool = True) -> Dict[str, Any]:
         """
         Perform comprehensive research on a market
 
         Args:
             market: Market data from scraper
+            use_cache: Whether to use cached results (default True)
 
         Returns:
             Research results with insights and analysis
@@ -84,8 +85,8 @@ class Researcher:
         market_id = market.get("id", "unknown")
         cache_file = self.cache_dir / f"research_{market_id}.json"
 
-        # Check cache first
-        if cache_file.exists():
+        # Check cache first (unless disabled)
+        if use_cache and cache_file.exists():
             logger.info(f"Loading cached research for market {market_id}")
             with open(cache_file, 'r') as f:
                 return json.load(f)
