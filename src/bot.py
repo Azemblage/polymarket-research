@@ -28,7 +28,7 @@ from telegram.ext import (
 
 from config import get_config
 from scraper import PolymarketScraper
-from researcher import Researcher, send_telegram_alert
+from researcher import Researcher, send_telegram_alert, _build_market_card, _fmt_vol
 from analyzer import Analyzer
 
 logger = logging.getLogger(__name__)
@@ -91,19 +91,32 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching live markets...")
     try:
         markets = await _fetch_live_markets(200)
-        edge = [m for m in markets if 0.55 <= m.get("probability", 0) <= 0.80][:10]
+        edge = [m for m in markets if 0.55 <= m.get("probability", 0) <= 0.80]
+        edge.sort(key=lambda x: x.get("volume_24hr", 0), reverse=True)
+        edge = edge[:10]
         if not edge:
             await update.message.reply_text("No edge markets found right now (55-80% YES).")
             return
-        msg = "<b>Edge Zone Markets — 55-80% YES</b>\n<i>Highest mispricing potential</i>\n\n"
+        divider = "<code>─────────────────────────────</code>"
+        lines = [
+            "🎯 <b>Top Edge Zone Markets</b>",
+            "<i>55–80% YES probability | No AI analysis — use your own judgement</i>",
+            divider,
+            "",
+        ]
+        import html as html_lib
         for m in edge:
-            prob = m.get("probability", 0) * 100
-            vol = m.get("volume_24hr", 0)
-            end = m.get("end_date", "")[:10] if m.get("end_date") else "?"
-            q = m.get("question", "")[:60]
+            prob = m.get("probability", 0)
+            vol = _fmt_vol(m.get("volume_24hr", 0))
+            end = (m.get("end_date", "") or "")[:10] or "?"
+            q = html_lib.escape(m.get("question", "")[:72])
             url = m.get("url", "")
-            msg += f"<b>{prob:.0f}% YES</b> | Vol 24h: ${vol:,.0f} | Ends: {end}\n"
-            msg += f"<a href='{url}'>{q}</a>\n\n"
+            lines.append(f"<b><a href='{url}'>{q}</a></b>")
+            lines.append(f"YES: <b>{prob:.0%}</b> | Vol 24h: {vol} | Ends: {end}")
+            lines.append("")
+        lines.append(divider)
+        lines.append("<i>Run /scan for AI-analysed high-confidence plays.</i>")
+        msg = "\n".join(lines)
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"cmd_top error: {e}")
@@ -117,20 +130,34 @@ async def cmd_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Fetching NO opportunities...")
     try:
         markets = await _fetch_live_markets(200)
-        no_mkts = [m for m in markets if m.get("probability", 0) < 0.30][:8]
+        no_mkts = [m for m in markets if m.get("probability", 0) < 0.30]
+        no_mkts.sort(key=lambda x: x.get("volume", 0), reverse=True)
+        no_mkts = no_mkts[:8]
         if not no_mkts:
             await update.message.reply_text("No strong NO opportunities right now.")
             return
-        msg = "<b>NO Opportunities — &lt;30% YES</b>\n<i>Buy NO tokens for contrarian edge</i>\n\n"
+        divider = "<code>─────────────────────────────</code>"
+        lines = [
+            "🔴 <b>BUY NO Opportunities</b>",
+            "<i>Markets pricing YES too high — buy NO tokens for contrarian edge</i>",
+            divider,
+            "",
+        ]
+        import html as html_lib
         for m in no_mkts:
-            prob = m.get("probability", 0) * 100
-            no_price = (1 - m.get("probability", 0)) * 100
-            vol = m.get("volume", 0)
-            end = m.get("end_date", "")[:10] if m.get("end_date") else "?"
-            q = m.get("question", "")[:60]
+            prob = m.get("probability", 0)
+            no_price_cents = int((1 - prob) * 100)
+            vol = _fmt_vol(m.get("volume", 0))
+            end = (m.get("end_date", "") or "")[:10] or "?"
+            q = html_lib.escape(m.get("question", "")[:72])
             url = m.get("url", "")
-            msg += f"<b>{prob:.0f}% YES → {no_price:.0f}% NO</b> | Vol: ${vol:,.0f} | Ends: {end}\n"
-            msg += f"<a href='{url}'>{q}</a>\n\n"
+            lines.append(f"🔴 <b>BUY NO</b> — YES: {prob:.0%} | NO token: <b>{no_price_cents}¢</b>")
+            lines.append(f"<b><a href='{url}'>{q}</a></b>")
+            lines.append(f"Vol: {vol} | Ends: {end}")
+            lines.append("")
+        lines.append(divider)
+        lines.append("<i>Run /scan for AI-analysed high-confidence plays. /top for YES opportunities.</i>")
+        msg = "\n".join(lines)
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
     except Exception as e:
         logger.error(f"cmd_no error: {e}")

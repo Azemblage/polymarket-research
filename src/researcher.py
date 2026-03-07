@@ -16,74 +16,110 @@ _SRC_DIR = Path(__file__).parent
 logger = logging.getLogger(__name__)
 
 
+def _fmt_vol(v: float) -> str:
+    """Format volume as compact string: $1.2M, $420K, $92K."""
+    if v >= 1_000_000:
+        return f"${v/1_000_000:.1f}M"
+    elif v >= 1_000:
+        return f"${v/1_000:.0f}K"
+    return f"${v:.0f}"
+
+
+def _truncate(text: str, limit: int = 72) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0] + "..."
+
+
+def _build_market_card(m: Dict[str, Any]) -> str:
+    """Build a single HTML market card with direction, edge, confidence, and AI reasoning."""
+    import html as html_lib
+    prob = m.get("probability", 0.5)
+    insights = m.get("insights", {})
+    groq = insights.get("groq_analysis", {})
+
+    ai_estimate = groq.get("estimated_true_probability", prob)
+    edge = groq.get("edge", ai_estimate - prob)
+    confidence = groq.get("confidence", 0.0)
+    direction = groq.get("direction", "HOLD")
+    reasoning = groq.get("reasoning", "")
+
+    if direction == "BUY_YES":
+        signal = "🟢 <b>BUY YES</b>"
+    elif direction == "BUY_NO":
+        signal = "🔴 <b>BUY NO</b>"
+    else:
+        signal = "⚪ HOLD"
+
+    conf_str = f"<b>{confidence:.0%}</b>" if confidence >= 0.75 else f"{confidence:.0%}"
+    vol_24h = _fmt_vol(m.get("volume_24hr", m.get("volume", 0)))
+    end_date = (m.get("end_date", "") or "")[:10] or "?"
+    question = html_lib.escape(_truncate(m.get("question", "Unknown"), 72))
+    url = m.get("url", "")
+    reasoning_snippet = html_lib.escape(reasoning[:160] + ("..." if len(reasoning) > 160 else ""))
+
+    lines = [
+        f"{signal} — Market: {prob:.0%} → AI: {ai_estimate:.0%}",
+        f"<b><a href='{url}'>{question}</a></b>",
+        f"Edge: <b>{edge:+.0%}</b> | Confidence: {conf_str} | Vol 24h: {vol_24h} | Ends: {end_date}",
+    ]
+    if reasoning_snippet:
+        lines.append(f"💡 <i>{reasoning_snippet}</i>")
+    return "\n".join(lines)
+
+
 async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]]) -> None:
-    """Send Telegram alert with market research"""
+    """Send Telegram alert with market research — high-confidence plays only."""
     if not config.telegram_bot_token or not config.telegram_chat_id:
         logger.warning("Telegram not configured - skipping alert")
         return
-    
+
     try:
         import httpx
 
-        # Edge zone: 55-80% YES — most mispricing potential
-        edge_markets = [m for m in markets_with_research if 0.55 <= m.get("probability", 0) <= 0.80]
-        # Contrarian: <30% YES — strong NO-side opportunities
-        no_markets = [m for m in markets_with_research if m.get("probability", 0) < 0.30]
-        # Near-resolved: >90% — low edge, surfaced for awareness only
-        resolved_markets = [m for m in markets_with_research if m.get("probability", 0) > 0.90]
+        # Filter to high-confidence, high-edge plays only
+        def _is_actionable(m: Dict[str, Any]) -> bool:
+            groq = m.get("insights", {}).get("groq_analysis", {})
+            edge = abs(groq.get("edge", 0))
+            confidence = groq.get("confidence", 0)
+            direction = groq.get("direction", "HOLD")
+            return edge > 0.05 and confidence > 0.60 and direction != "HOLD"
 
+        actionable = [m for m in markets_with_research if _is_actionable(m)]
+        filtered_count = len(markets_with_research) - len(actionable)
+
+        # Sort by edge strength descending
+        actionable.sort(key=lambda m: abs(m.get("insights", {}).get("groq_analysis", {}).get("edge", 0)), reverse=True)
+
+        divider = "<code>─────────────────────────────</code>"
         lines = [
-            "📊 Polymarket Research Report",
-            "=" * 35,
-            f"Scanned {len(markets_with_research)} markets",
-            ""
+            "📊 <b>Polymarket Research Report</b>",
+            f"<i>Scanned {len(markets_with_research)} markets — {len(actionable)} high-confidence plays found</i>",
+            divider,
+            "",
         ]
 
-        # EDGE ZONE — most actionable
-        if edge_markets:
-            lines.append(f"🎯 EDGE ZONE 55-80% ({len(edge_markets)} markets):")
-            for m in sorted(edge_markets, key=lambda x: x.get("volume_24hr", 0), reverse=True)[:8]:
-                prob = m.get("probability", 0) * 100
-                delta = m.get("insights", {}).get("sentiment_delta", 0) * 100
-                delta_str = f" ({'+' if delta >= 0 else ''}{delta:.1f}% move)" if delta != 0 else ""
-                vol_24h = m.get("volume_24hr", 0)
-                end_date = m.get("end_date", "")[:10] if m.get("end_date") else "?"
-                lines.append(f"  {prob:.0f}% YES{delta_str} | Vol 24h: ${vol_24h:,.0f} | Ends: {end_date}")
-                lines.append(f"  {m.get('question', '')[:70]}")
-                lines.append(f"  {m.get('url', '')}")
+        if actionable:
+            for m in actionable[:8]:
+                lines.append(_build_market_card(m))
                 lines.append("")
         else:
-            lines.append("No edge-zone markets found this scan.")
+            lines.append("<i>No high-confidence plays this scan. All markets below edge/confidence threshold.</i>")
             lines.append("")
 
-        # NO OPPORTUNITIES — contrarian
-        if no_markets:
-            lines.append(f"🔴 NO OPPORTUNITIES <30% ({len(no_markets)} markets):")
-            for m in sorted(no_markets, key=lambda x: x.get("volume", 0), reverse=True)[:5]:
-                prob = m.get("probability", 0) * 100
-                no_return = (1 - m.get("probability", 0.5)) / m.get("probability", 0.5) * 100 if m.get("probability", 0) > 0 else 0
-                end_date = m.get("end_date", "")[:10] if m.get("end_date") else "?"
-                lines.append(f"  {prob:.0f}% YES | NO return if correct: +{no_return:.0f}% | Ends: {end_date}")
-                lines.append(f"  {m.get('question', '')[:70]}")
-                lines.append("")
-
-        # NEAR-RESOLVED — awareness only
-        if resolved_markets:
-            lines.append(f"✅ NEAR-RESOLVED >90% (low edge, {len(resolved_markets)} markets — info only)")
-            for m in sorted(resolved_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
-                prob = m.get("probability", 0) * 100
-                lines.append(f"  {prob:.0f}% — {m.get('question', '')[:60]}")
+        lines.append(divider)
+        lines.append(f"<i>{filtered_count} markets below edge/confidence threshold — not shown</i>")
 
         msg = "\n".join(lines)
 
-        # Send via Telegram with response validation
         async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.post(
                 f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage",
                 json={
                     "chat_id": config.telegram_chat_id,
                     "text": msg,
-                    "parse_mode": "Markdown"
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
                 }
             )
             if response.status_code == 200:
