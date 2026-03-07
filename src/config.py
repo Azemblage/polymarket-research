@@ -1,4 +1,4 @@
-bot """
+"""
 Configuration management for Polymarket Research Bot
 """
 import os
@@ -35,17 +35,18 @@ class Config:
     # Filter
     min_volume: float = float(os.getenv("MIN_VOLUME", "100000"))  # $100K min volume
 
-    @classmethod
-    def validate(cls) -> list[str]:
+    def validate(self) -> list[str]:
         """Validate configuration and return list of errors"""
         errors = []
 
         # Only require Telegram if alerts are enabled
-        if cls.enable_alerts:
-            if not cls.telegram_bot_token:
+        if self.enable_alerts:
+            if not self.telegram_bot_token:
                 errors.append("TELEGRAM_BOT_TOKEN required for alerts")
-            if not cls.telegram_chat_id:
+            if not self.telegram_chat_id:
                 errors.append("TELEGRAM_CHAT_ID required for alerts")
+        if not self.groq_api_key:
+            errors.append("GROQ_API_KEY not set — AI analysis will fall back to basic mode")
 
         return errors
 

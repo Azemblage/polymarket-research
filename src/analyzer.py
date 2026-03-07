@@ -16,7 +16,7 @@ class Analyzer:
 
     def __init__(self, config):
         self.config = config
-        self.processed_dir = Path("data/processed")
+        self.processed_dir = Path(__file__).parent.parent / "data" / "processed"
 
     def analyze_market(self, market: Dict[str, Any], research_data: Dict[str, Any]) -> Dict[str, Any]:
         """

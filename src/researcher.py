@@ -4,10 +4,14 @@ AI-powered Market Researcher with Telegram Alerts
 import asyncio
 import json
 import logging
+import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
 from pathlib import Path
 
 from config import get_config
+
+_SRC_DIR = Path(__file__).parent
 
 logger = logging.getLogger(__name__)
 
@@ -20,40 +24,61 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
     
     try:
         import httpx
-        
-        # Categorize markets
-        green_markets = [m for m in markets_with_research if m.get("probability", 0) > 0.90]
-        yellow_markets = [m for m in markets_with_research if 0.70 <= m.get("probability", 0) <= 0.90]
-        
-        # Build message
+
+        # Edge zone: 55-80% YES — most mispricing potential
+        edge_markets = [m for m in markets_with_research if 0.55 <= m.get("probability", 0) <= 0.80]
+        # Contrarian: <30% YES — strong NO-side opportunities
+        no_markets = [m for m in markets_with_research if m.get("probability", 0) < 0.30]
+        # Near-resolved: >90% — low edge, surfaced for awareness only
+        resolved_markets = [m for m in markets_with_research if m.get("probability", 0) > 0.90]
+
         lines = [
-            "🎯 Polymarket Research Report",
+            "📊 Polymarket Research Report",
             "=" * 35,
-            f"Scanned {len(markets_with_research)} markets | Found {len(green_markets)} GREEN - >90%",
+            f"Scanned {len(markets_with_research)} markets",
             ""
         ]
-        
-        # GREEN - GREEN - >90%
-        if green_markets:
-            lines.append("🟢 HIGH VALUE BETS (>90%):")
-            for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:10]:
+
+        # EDGE ZONE — most actionable
+        if edge_markets:
+            lines.append(f"🎯 EDGE ZONE 55-80% ({len(edge_markets)} markets):")
+            for m in sorted(edge_markets, key=lambda x: x.get("volume_24hr", 0), reverse=True)[:8]:
                 prob = m.get("probability", 0) * 100
                 delta = m.get("insights", {}).get("sentiment_delta", 0) * 100
-                delta_str = f" ({'+' if delta >= 0 else ''}{delta:.1f}%)" if delta != 0 else ""
-                
-                lines.append(f"✅ {prob:.0f}%{delta_str} | ${m.get('volume', 0):,.0f}")
-                lines.append(f"   {m.get('question', '')}")
-                lines.append(f"   🔗 {m.get('url', '')}")
-            lines.append("")
+                delta_str = f" ({'+' if delta >= 0 else ''}{delta:.1f}% move)" if delta != 0 else ""
+                vol_24h = m.get("volume_24hr", 0)
+                end_date = m.get("end_date", "")[:10] if m.get("end_date") else "?"
+                lines.append(f"  {prob:.0f}% YES{delta_str} | Vol 24h: ${vol_24h:,.0f} | Ends: {end_date}")
+                lines.append(f"  {m.get('question', '')[:70]}")
+                lines.append(f"  {m.get('url', '')}")
+                lines.append("")
         else:
-            lines.append("No sure bets found this scan.")
-        
-        
+            lines.append("No edge-zone markets found this scan.")
+            lines.append("")
+
+        # NO OPPORTUNITIES — contrarian
+        if no_markets:
+            lines.append(f"🔴 NO OPPORTUNITIES <30% ({len(no_markets)} markets):")
+            for m in sorted(no_markets, key=lambda x: x.get("volume", 0), reverse=True)[:5]:
+                prob = m.get("probability", 0) * 100
+                no_return = (1 - m.get("probability", 0.5)) / m.get("probability", 0.5) * 100 if m.get("probability", 0) > 0 else 0
+                end_date = m.get("end_date", "")[:10] if m.get("end_date") else "?"
+                lines.append(f"  {prob:.0f}% YES | NO return if correct: +{no_return:.0f}% | Ends: {end_date}")
+                lines.append(f"  {m.get('question', '')[:70]}")
+                lines.append("")
+
+        # NEAR-RESOLVED — awareness only
+        if resolved_markets:
+            lines.append(f"✅ NEAR-RESOLVED >90% (low edge, {len(resolved_markets)} markets — info only)")
+            for m in sorted(resolved_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
+                prob = m.get("probability", 0) * 100
+                lines.append(f"  {prob:.0f}% — {m.get('question', '')[:60]}")
+
         msg = "\n".join(lines)
-        
-        # Send via Telegram
+
+        # Send via Telegram with response validation
         async with httpx.AsyncClient(timeout=30.0) as client:
-            await client.post(
+            response = await client.post(
                 f"https://api.telegram.org/bot{config.telegram_bot_token}/sendMessage",
                 json={
                     "chat_id": config.telegram_chat_id,
@@ -61,8 +86,11 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
                     "parse_mode": "Markdown"
                 }
             )
-            logger.info("Telegram alert sent!")
-            
+            if response.status_code == 200:
+                logger.info("Telegram alert sent successfully.")
+            else:
+                logger.error(f"Telegram API error {response.status_code}: {response.text[:200]}")
+
     except Exception as e:
         logger.error(f"Failed to send Telegram alert: {e}")
 
@@ -70,9 +98,11 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
 class Researcher:
     """Conducts AI-powered research on Polymarket markets"""
 
+    CACHE_TTL_HOURS = 4  # Reject cache entries older than this
+
     def __init__(self, config):
         self.config = config
-        self.cache_dir = Path("data/cache")
+        self.cache_dir = _SRC_DIR.parent / "data" / "cache"
 
     async def research_market(self, market: Dict[str, Any], use_cache: bool = True) -> Dict[str, Any]:
         """
@@ -88,11 +118,15 @@ class Researcher:
         market_id = market.get("id", "unknown")
         cache_file = self.cache_dir / f"research_{market_id}.json"
 
-        # Check cache first (unless disabled)
+        # Check cache first (unless disabled), respecting TTL
         if use_cache and cache_file.exists():
-            logger.info(f"Loading cached research for market {market_id}")
-            with open(cache_file, 'r') as f:
-                return json.load(f)
+            age_hours = (time.time() - cache_file.stat().st_mtime) / 3600
+            if age_hours < self.CACHE_TTL_HOURS:
+                logger.info(f"Loading cached research for market {market_id} ({age_hours:.1f}h old)")
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+            else:
+                logger.info(f"Cache expired for market {market_id} ({age_hours:.1f}h old), refreshing")
 
         logger.info(f"Researching market: {market.get('question', market.get('title', 'Unknown'))}")
 
@@ -102,7 +136,7 @@ class Researcher:
                 "market_id": market_id,
                 "title": market.get("title"),
                 "url": market.get("url"),
-                "research_timestamp": asyncio.get_event_loop().time(),
+                "research_timestamp": time.time(),
             }
 
             # Get historical sentiment for delta
@@ -195,24 +229,34 @@ class Researcher:
             question = market.get("question", "Unknown market")
             prob = market.get("probability", 0.5)
             volume = market.get("volume", 0)
+            volume_24h = market.get("volume_24hr", 0)
+            end_date = market.get("end_date", "unknown")[:10] if market.get("end_date") else "unknown"
+            category = market.get("category", "general")
+            spread = abs(market.get("best_ask", prob) - market.get("best_bid", prob))
             url = market.get("url", "")
-            
-            prompt = f"""You are a crypto prediction market analyst. Analyze this Polymarket market:
+
+            prompt = f"""You are an expert prediction market analyst. Analyze this Polymarket binary market and estimate whether it is MISPRICED — i.e. whether the crowd probability diverges from the true probability.
 
 Market: {question}
-Current Yes Probability: {prob:.1%}
-Volume: ${volume:,.0f}
+Category: {category}
+Current YES Price: {prob:.1%}
+Resolution Date: {end_date}
+Total Volume: ${volume:,.0f}
+24h Volume: ${volume_24h:,.0f}
+Bid-Ask Spread: {spread:.3f}
 URL: {url}
 
-Provide a brief analysis with:
-1. sentiment: "bullish", "bearish", or "neutral" 
-2. confidence: 0.0-1.0
-3. key_factors: list of 3 important factors
-4. risks: list of 2-3 risks
-5. opportunities: list of 2-3 opportunities
-6. reasoning: brief explanation
+Provide your analysis as JSON with these fields:
+1. "estimated_true_probability": your independent estimate of YES probability (0.0-1.0), based on your knowledge — NOT anchored to the market price
+2. "edge": estimated_true_probability minus market price (positive = market underpricing YES, negative = market overpricing YES)
+3. "direction": "BUY_YES", "BUY_NO", or "HOLD"
+4. "confidence": your confidence in this assessment (0.0-1.0)
+5. "resolution_risk": "LOW", "MEDIUM", or "HIGH" — how ambiguous is the resolution criteria?
+6. "key_factors": list of 3 most important factors for resolution
+7. "risks": list of 2 main risks to your thesis
+8. "reasoning": 1-2 sentence explanation of the edge
 
-Respond in JSON format only."""
+Respond in JSON format only. Be honest if you have low confidence or insufficient information."""
 
             async with httpx.AsyncClient(timeout=60.0) as client:
                 response = await client.post(
@@ -239,16 +283,22 @@ Respond in JSON format only."""
                         json_match = re.search(r'\{.*\}', content, re.DOTALL)
                         if json_match:
                             analysis = json.loads(json_match.group())
+                            estimated_prob = float(analysis.get("estimated_true_probability", prob))
+                            edge = estimated_prob - prob
+                            sentiment = "bullish" if edge > 0.03 else "bearish" if edge < -0.03 else "neutral"
                             return {
-                                "sentiment": analysis.get("sentiment", "neutral"),
+                                "sentiment": sentiment,
+                                "estimated_true_probability": estimated_prob,
+                                "edge": round(edge, 3),
+                                "direction": analysis.get("direction", "HOLD"),
                                 "confidence": float(analysis.get("confidence", 0.5)),
-                                "reasoning": analysis.get("reasoning", "")[:200],
+                                "resolution_risk": analysis.get("resolution_risk", "MEDIUM"),
+                                "reasoning": analysis.get("reasoning", "")[:300],
                                 "key_factors": analysis.get("key_factors", [])[:3],
                                 "risks": analysis.get("risks", [])[:3],
-                                "opportunities": analysis.get("opportunities", [])[:3]
                             }
-                    except:
-                        pass
+                    except Exception as parse_err:
+                        logger.warning(f"Failed to parse Groq JSON response: {parse_err}")
                     
                     # Fallback if JSON parsing fails
                     return {
@@ -268,24 +318,18 @@ Respond in JSON format only."""
         return None
 
     def _combine_insights(self, insights: Dict[str, Any]) -> Dict[str, Any]:
-        """Combine insights from multiple AI providers"""
+        """Combine insights from AI providers"""
         sentiments = []
+        for key in ("groq_analysis", "openai_analysis", "anthropic_analysis"):
+            if key in insights:
+                sentiments.append(insights[key].get("sentiment"))
 
-        if "openai_analysis" in insights:
-            sentiments.append(insights["openai_analysis"].get("sentiment"))
-
-        if "anthropic_analysis" in insights:
-            sentiments.append(insights["anthropic_analysis"].get("sentiment"))
-
-        # Determine overall sentiment (simple majority)
         if sentiments:
             bullish_count = sum(1 for s in sentiments if s == "bullish")
             bearish_count = sum(1 for s in sentiments if s == "bearish")
-            neutral_count = sum(1 for s in sentiments if s == "neutral")
-
-            if bullish_count > bearish_count and bullish_count > neutral_count:
+            if bullish_count > bearish_count:
                 overall_sentiment = "bullish"
-            elif bearish_count > bullish_count and bearish_count > neutral_count:
+            elif bearish_count > bullish_count:
                 overall_sentiment = "bearish"
             else:
                 overall_sentiment = "neutral"
@@ -300,16 +344,11 @@ Respond in JSON format only."""
     def _calculate_confidence(self, insights: Dict[str, Any]) -> float:
         """Calculate overall confidence score"""
         confidences = []
+        for key in ("groq_analysis", "openai_analysis", "anthropic_analysis"):
+            if key in insights:
+                confidences.append(float(insights[key].get("confidence", 0)))
 
-        if "openai_analysis" in insights:
-            confidences.append(insights["openai_analysis"].get("confidence", 0))
-
-        if "anthropic_analysis" in insights:
-            confidences.append(insights["anthropic_analysis"].get("confidence", 0))
-
-        if confidences:
-            return sum(confidences) / len(confidences)
-        return 0.0
+        return sum(confidences) / len(confidences) if confidences else 0.0
 
     def _generate_summary(self, insights: Dict[str, Any]) -> str:
         """Generate human-readable summary"""
@@ -329,12 +368,14 @@ Respond in JSON format only."""
         logger.debug(f"Cached research to {cache_file}")
 
     def _get_historical_research(self, market_id: str) -> Optional[Dict[str, Any]]:
-        """Load the most recent cached research for a market to calculate delta."""
+        """Load cached research for delta calculation. Returns None if missing or expired."""
         cache_file = self.cache_dir / f"research_{market_id}.json"
         if cache_file.exists():
             try:
-                with open(cache_file, 'r') as f:
-                    return json.load(f)
+                age_hours = (time.time() - cache_file.stat().st_mtime) / 3600
+                if age_hours < self.CACHE_TTL_HOURS:
+                    with open(cache_file, 'r') as f:
+                        return json.load(f)
             except Exception as e:
-                logger.error(f"Error loading historical cache: {e}")
+                logger.warning(f"Error loading historical cache for {market_id}: {e}")
         return None

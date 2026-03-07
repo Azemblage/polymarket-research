@@ -150,7 +150,7 @@ class PolymarketScraper:
     def _save_raw_data(self, markets: List[Dict[str, Any]]):
         """Save raw scraped data to file"""
         import time
-        data_file = Path("data/raw") / f"markets_{int(time.time())}.json"
+        data_file = Path(__file__).parent.parent / "data" / "raw" / f"markets_{int(time.time())}.json"
         data_file.parent.mkdir(parents=True, exist_ok=True)
 
         with open(data_file, 'w') as f:
