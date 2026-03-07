@@ -84,38 +84,100 @@ async def _fetch_live_markets(limit: int = 100):
     return sorted(filtered, key=lambda x: x.get("volume_24hr", 0), reverse=True)
 
 
+def _enrich_with_cache(markets: list) -> list:
+    """
+    Merge cached AI research into each market dict (if available).
+    Returns list sorted by AI edge descending; unresearched markets go last.
+    """
+    import json
+    from pathlib import Path
+    cache_dir = Path(__file__).parent.parent / "data" / "cache"
+    enriched = []
+    for m in markets:
+        market_id = m.get("id", "")
+        cache_file = cache_dir / f"research_{market_id}.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file) as f:
+                    research = json.load(f)
+                m = {**m, "insights": research.get("insights", {}), "_has_ai": True}
+            except Exception:
+                m = {**m, "_has_ai": False}
+        else:
+            m = {**m, "_has_ai": False}
+        enriched.append(m)
+
+    def sort_key(m):
+        groq = m.get("insights", {}).get("groq_analysis", {})
+        edge = abs(groq.get("edge", 0))
+        has_ai = 1 if m.get("_has_ai") else 0
+        return (has_ai, edge)
+
+    return sorted(enriched, key=sort_key, reverse=True)
+
+
+def _is_high_confidence(m: dict, min_edge: float = 0.05, min_conf: float = 0.60) -> bool:
+    groq = m.get("insights", {}).get("groq_analysis", {})
+    return (
+        abs(groq.get("edge", 0)) > min_edge
+        and groq.get("confidence", 0) > min_conf
+        and groq.get("direction", "HOLD") != "HOLD"
+    )
+
+
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show top edge markets (55-80% YES probability)."""
+    """Show top AI-backed BUY YES opportunities, falling back to raw data if no cache."""
     if not _authorized(update):
         return
-    await update.message.reply_text("Fetching live markets...")
+    await update.message.reply_text("Fetching markets — checking AI research cache...")
     try:
-        markets = await _fetch_live_markets(200)
-        edge = [m for m in markets if 0.55 <= m.get("probability", 0) <= 0.80]
-        edge.sort(key=lambda x: x.get("volume_24hr", 0), reverse=True)
-        edge = edge[:10]
-        if not edge:
-            await update.message.reply_text("No edge markets found right now (55-80% YES).")
-            return
-        divider = "<code>─────────────────────────────</code>"
-        lines = [
-            "🎯 <b>Top Edge Zone Markets</b>",
-            "<i>55–80% YES probability | No AI analysis — use your own judgement</i>",
-            divider,
-            "",
-        ]
         import html as html_lib
-        for m in edge:
-            prob = m.get("probability", 0)
-            vol = _fmt_vol(m.get("volume_24hr", 0))
-            end = (m.get("end_date", "") or "")[:10] or "?"
-            q = html_lib.escape(m.get("question", "")[:72])
-            url = m.get("url", "")
-            lines.append(f"<b><a href='{url}'>{q}</a></b>")
-            lines.append(f"YES: <b>{prob:.0%}</b> | Vol 24h: {vol} | Ends: {end}")
-            lines.append("")
-        lines.append(divider)
-        lines.append("<i>Run /scan for AI-analysed high-confidence plays.</i>")
+        markets = await _fetch_live_markets(200)
+        enriched = _enrich_with_cache(markets)
+
+        # Priority 1: AI-backed high-confidence BUY YES
+        ai_plays = [
+            m for m in enriched
+            if _is_high_confidence(m)
+            and m.get("insights", {}).get("groq_analysis", {}).get("direction") == "BUY_YES"
+        ][:8]
+
+        divider = "<code>─────────────────────────────</code>"
+
+        if ai_plays:
+            lines = [
+                "🎯 <b>Top BUY YES Plays — AI Backed</b>",
+                f"<i>{len(ai_plays)} high-confidence opportunities from last scan</i>",
+                divider, "",
+            ]
+            for m in ai_plays:
+                lines.append(_build_market_card(m))
+                lines.append("")
+            lines.append(divider)
+            lines.append("<i>Run /scan to refresh AI analysis. /no for BUY NO plays.</i>")
+        else:
+            # Fallback: raw edge zone with disclaimer
+            raw_edge = [m for m in enriched if 0.55 <= m.get("probability", 0) <= 0.80][:10]
+            if not raw_edge:
+                await update.message.reply_text("No edge markets found right now (55-80% YES).")
+                return
+            lines = [
+                "🎯 <b>Edge Zone Markets — 55–80% YES</b>",
+                "<i>No AI analysis cached yet — run /scan first for high-confidence signals</i>",
+                divider, "",
+            ]
+            for m in raw_edge:
+                prob = m.get("probability", 0)
+                vol = _fmt_vol(m.get("volume_24hr", 0))
+                end = (m.get("end_date", "") or "")[:10] or "?"
+                q = html_lib.escape(m.get("question", "")[:80])
+                url = m.get("url", "")
+                lines.append(f"<b><a href='{url}'>{q}</a></b>")
+                lines.append(f"YES: <b>{prob:.0%}</b> | Vol 24h: {vol} | Ends: {end}")
+                lines.append("")
+            lines.append(divider)
+            lines.append("<i>Run /scan for AI-backed signals with reasoning. /no for BUY NO plays.</i>")
+
         msg = "\n".join(lines)
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
     except Exception as e:
@@ -124,39 +186,63 @@ async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_no(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show strong NO opportunities (<30% YES)."""
+    """Show AI-backed BUY NO opportunities, falling back to raw <30% YES if no cache."""
     if not _authorized(update):
         return
-    await update.message.reply_text("Fetching NO opportunities...")
+    await update.message.reply_text("Fetching markets — checking AI research cache...")
     try:
-        markets = await _fetch_live_markets(200)
-        no_mkts = [m for m in markets if m.get("probability", 0) < 0.30]
-        no_mkts.sort(key=lambda x: x.get("volume", 0), reverse=True)
-        no_mkts = no_mkts[:8]
-        if not no_mkts:
-            await update.message.reply_text("No strong NO opportunities right now.")
-            return
-        divider = "<code>─────────────────────────────</code>"
-        lines = [
-            "🔴 <b>BUY NO Opportunities</b>",
-            "<i>Markets pricing YES too high — buy NO tokens for contrarian edge</i>",
-            divider,
-            "",
-        ]
         import html as html_lib
-        for m in no_mkts:
-            prob = m.get("probability", 0)
-            no_price_cents = int((1 - prob) * 100)
-            vol = _fmt_vol(m.get("volume", 0))
-            end = (m.get("end_date", "") or "")[:10] or "?"
-            q = html_lib.escape(m.get("question", "")[:72])
-            url = m.get("url", "")
-            lines.append(f"🔴 <b>BUY NO</b> — YES: {prob:.0%} | NO token: <b>{no_price_cents}¢</b>")
-            lines.append(f"<b><a href='{url}'>{q}</a></b>")
-            lines.append(f"Vol: {vol} | Ends: {end}")
-            lines.append("")
-        lines.append(divider)
-        lines.append("<i>Run /scan for AI-analysed high-confidence plays. /top for YES opportunities.</i>")
+        markets = await _fetch_live_markets(200)
+        enriched = _enrich_with_cache(markets)
+
+        # Priority 1: AI-backed high-confidence BUY NO
+        ai_plays = [
+            m for m in enriched
+            if _is_high_confidence(m)
+            and m.get("insights", {}).get("groq_analysis", {}).get("direction") == "BUY_NO"
+        ][:8]
+
+        divider = "<code>─────────────────────────────</code>"
+
+        if ai_plays:
+            lines = [
+                "🔴 <b>BUY NO Plays — AI Backed</b>",
+                f"<i>{len(ai_plays)} high-confidence NO opportunities from last scan</i>",
+                divider, "",
+            ]
+            for m in ai_plays:
+                lines.append(_build_market_card(m))
+                lines.append("")
+            lines.append(divider)
+            lines.append("<i>Run /scan to refresh AI analysis. /top for BUY YES plays.</i>")
+        else:
+            # Fallback: raw <30% YES with payout math
+            raw_no = [m for m in enriched if m.get("probability", 0) < 0.30]
+            raw_no.sort(key=lambda x: x.get("volume_24hr", x.get("volume", 0)), reverse=True)
+            raw_no = raw_no[:8]
+            if not raw_no:
+                await update.message.reply_text("No strong NO opportunities right now.")
+                return
+            lines = [
+                "🔴 <b>NO Signals — &lt;30% YES</b>",
+                "<i>No AI analysis cached yet — run /scan first for evidence-backed signals</i>",
+                divider, "",
+            ]
+            for m in raw_no:
+                prob = m.get("probability", 0)
+                no_cents = int((1 - prob) * 100)
+                payout = round(1 / (1 - prob), 2) if prob < 1 else 0
+                vol = _fmt_vol(m.get("volume_24hr", m.get("volume", 0)))
+                end = (m.get("end_date", "") or "")[:10] or "?"
+                q = html_lib.escape(m.get("question", "")[:80])
+                url = m.get("url", "")
+                lines.append(f"🔴 <b>BUY NO</b> — YES: {prob:.0%} | Buy NO at <b>{no_cents}¢</b> → pays $1.00")
+                lines.append(f"<b><a href='{url}'>{q}</a></b>")
+                lines.append(f"Vol 24h: {vol} | Ends: {end}")
+                lines.append("")
+            lines.append(divider)
+            lines.append("<i>Run /scan for AI-backed signals with news reasoning. /top for BUY YES plays.</i>")
+
         msg = "\n".join(lines)
         await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
     except Exception as e:
