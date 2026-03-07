@@ -1,4 +1,4 @@
-"""
+bot """
 Configuration management for Polymarket Research Bot
 """
 import os

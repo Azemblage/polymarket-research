@@ -35,10 +35,13 @@ async def send_telegram_alert(config, markets_with_research: List[Dict[str, Any]
         
         # GREEN - GREEN - >90%
         if green_markets:
-            lines.append("🟢 HIGH VALUE BETS (70-90% - Good Reward!):")
+            lines.append("🟢 HIGH VALUE BETS (>90%):")
             for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True)[:10]:
                 prob = m.get("probability", 0) * 100
-                lines.append(f"✅ {prob:.0f}% | ${m.get('volume', 0):,.0f}")
+                delta = m.get("insights", {}).get("sentiment_delta", 0) * 100
+                delta_str = f" ({'+' if delta >= 0 else ''}{delta:.1f}%)" if delta != 0 else ""
+                
+                lines.append(f"✅ {prob:.0f}%{delta_str} | ${m.get('volume', 0):,.0f}")
                 lines.append(f"   {m.get('question', '')}")
                 lines.append(f"   🔗 {m.get('url', '')}")
             lines.append("")
@@ -102,8 +105,18 @@ class Researcher:
                 "research_timestamp": asyncio.get_event_loop().time(),
             }
 
+            # Get historical sentiment for delta
+            historical = self._get_historical_research(market_id)
+            if historical:
+                old_prob = historical.get("probability", market.get("probability", 0.5))
+                new_prob = market.get("probability", 0.5)
+                research_data["sentiment_delta"] = new_prob - old_prob
+            else:
+                research_data["sentiment_delta"] = 0.0
+
             # Call AI providers
             insights = await self._gather_insights(market)
+            insights["sentiment_delta"] = research_data["sentiment_delta"]
             research_data["insights"] = insights
 
             # Calculate confidence scores
@@ -111,6 +124,9 @@ class Researcher:
 
             # Generate summary
             research_data["summary"] = self._generate_summary(insights)
+
+            # Add probability for next delta check
+            research_data["probability"] = market.get("probability")
 
             # Cache results
             await self._cache_research(cache_file, research_data)
@@ -311,3 +327,14 @@ Respond in JSON format only."""
         with open(cache_file, 'w') as f:
             json.dump(research_data, f, indent=2)
         logger.debug(f"Cached research to {cache_file}")
+
+    def _get_historical_research(self, market_id: str) -> Optional[Dict[str, Any]]:
+        """Load the most recent cached research for a market to calculate delta."""
+        cache_file = self.cache_dir / f"research_{market_id}.json"
+        if cache_file.exists():
+            try:
+                with open(cache_file, 'r') as f:
+                    return json.load(f)
+            except Exception as e:
+                logger.error(f"Error loading historical cache: {e}")
+        return None
