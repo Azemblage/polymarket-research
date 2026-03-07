@@ -28,8 +28,8 @@ async def main():
             logger.warning(f"Configuration: {error}")
         logger.info("Continuing anyway - alerts disabled if no Telegram config")
 
-    # Ensure data directories exist
-    data_dir = Path("data")
+    # Ensure data directories exist (anchored to script location)
+    data_dir = Path(__file__).parent.parent / "data"
     for subdir in ["raw", "processed", "cache"]:
         (data_dir / subdir).mkdir(parents=True, exist_ok=True)
 
@@ -55,52 +55,57 @@ async def main():
             sorted_markets = sorted(filtered, key=lambda x: x.get("volume", 0), reverse=True)
             top_markets = sorted_markets[:50]  # Process top 50 markets for variety
             
-            # Research each market (skip cache to get fresh data each time)
+            # Research each market with TTL-aware cache
+            analyzer = Analyzer(config)
             research_results = []
             for market in top_markets:
                 logger.info(f"Researching: {market.get('question', 'N/A')[:50]}...")
-                
-                # Combine market data with research (no cache for fresh scans)
-                research = await researcher.research_market(market, use_cache=False)
-                market_with_research = {**market, "insights": research.get("insights", {})}
+                research = await researcher.research_market(market, use_cache=True)
+                analysis = analyzer.analyze_market(market, research)
+                market_with_research = {
+                    **market,
+                    "insights": research.get("insights", {}),
+                    "analysis": analysis,
+                }
                 research_results.append(market_with_research)
-                
-                # Brief delay to be nice to APIs
-                await asyncio.sleep(0.3)
-            
+                await asyncio.sleep(0.5)  # respect Groq rate limits
+
             logger.info(f"Researched {len(research_results)} markets")
-            
+
             # Send Telegram alert if configured
             if config.enable_alerts:
                 await send_telegram_alert(config, research_results)
-            
-            # Categorize markets
-            green_markets = [m for m in research_results if m.get("probability", 0) > 0.90]  # 70-90% = good value
-            yellow_markets = [m for m in research_results if 0.70 <= m.get("probability", 0) <= 0.90]  # 60-80% = likely
-            red_markets = [m for m in research_results if m.get("probability", 0) <= 0.40]  # <40% = likely NO
-            
-            # Print summary
+
+            # Console summary — edge zone first, then contrarian, then near-resolved
+            edge_markets = [m for m in research_results if 0.55 <= m.get("probability", 0) <= 0.80]
+            no_markets = [m for m in research_results if m.get("probability", 0) < 0.30]
+            resolved_markets = [m for m in research_results if m.get("probability", 0) > 0.90]
+
             print("\n" + "="*50)
-            print("🎯 POLYMARKET RESEARCH RESULTS")
+            print("POLYMARKET RESEARCH RESULTS")
             print("="*50)
-            
-            # GREEN - HIGH PROBABILITY (BUY YES)
-            if green_markets:
-                print("\n🟢 GREEN - >90% (BUY YES - >80%):")
-                print("-" * 40)
-                for m in sorted(green_markets, key=lambda x: x.get("probability", 0), reverse=True):
+
+            print(f"\nEDGE ZONE 55-80% ({len(edge_markets)} markets — best potential):")
+            print("-" * 40)
+            for m in sorted(edge_markets, key=lambda x: x.get("volume_24hr", 0), reverse=True)[:10]:
+                prob = m.get("probability", 0) * 100
+                action = m.get("analysis", {}).get("recommendation", {}).get("action", "")
+                end_date = m.get("end_date", "?")[:10] if m.get("end_date") else "?"
+                print(f"   {prob:.0f}% | {action} | Ends: {end_date} | {m.get('question', '')[:55]}")
+
+            if no_markets:
+                print(f"\nNO OPPORTUNITIES <30% ({len(no_markets)} markets):")
+                for m in sorted(no_markets, key=lambda x: x.get("volume", 0), reverse=True)[:5]:
                     prob = m.get("probability", 0) * 100
-                    print(f"   ✅ {prob:.0f}% | ${m.get('volume', 0):,.0f}")
-                    print(f"      {m.get('question', '')[:55]}")
-                    print(f"      🔗 {m.get('url', '')[:50]}")
-            
-            # YELLOW - YELLOW - 70-90%
-            if yellow_markets:
-                print(f"\n🟡 YELLOW - 70-90% ({len(yellow_markets)} markets)")
-                for m in sorted(yellow_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
+                    end_date = m.get("end_date", "?")[:10] if m.get("end_date") else "?"
+                    print(f"   {prob:.0f}% YES | Ends: {end_date} | {m.get('question', '')[:55]}")
+
+            if resolved_markets:
+                print(f"\nNEAR-RESOLVED >90% (low edge — {len(resolved_markets)} markets):")
+                for m in sorted(resolved_markets, key=lambda x: x.get("probability", 0), reverse=True)[:3]:
                     prob = m.get("probability", 0) * 100
-                    print(f"   {prob:.0f}% | {m.get('question', '')[:50]}...")
-            
+                    print(f"   {prob:.0f}% — {m.get('question', '')[:55]}")
+
             print("\n" + "="*50)
             
     except KeyboardInterrupt:
@@ -112,6 +117,24 @@ async def main():
     return 0
 
 
+async def run_with_bot():
+    """
+    Run both the research scheduler AND the Telegram command bot concurrently.
+    Used when deployed (GitHub Actions runs main() directly for one-shot runs).
+    """
+    from bot import main as bot_main
+    await asyncio.gather(
+        main(),
+        bot_main(),
+    )
+
+
 if __name__ == "__main__":
-    exit_code = asyncio.run(main())
-    exit(exit_code)
+    import sys
+    if "--bot" in sys.argv:
+        # Run research loop + Telegram bot together
+        asyncio.run(run_with_bot())
+    else:
+        # One-shot research run (default for GitHub Actions)
+        exit_code = asyncio.run(main())
+        exit(exit_code)
